@@ -175,6 +175,24 @@
     position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--gold); color:#141210;
     padding:12px 20px; border-radius:10px; font-weight:600; font-size:14px; z-index:999; box-shadow:0 8px 24px rgba(0,0,0,.4);
   }
+  .barber-card{display:flex; align-items:center; gap:12px; cursor:pointer;}
+  .barber-card:active{transform:scale(.98);}
+  .barber-card.selected{border-color:var(--gold); background:var(--bg-panel-2);}
+  .barber-avatar{width:48px; height:48px; border-radius:50%; object-fit:cover; border:1px solid var(--line); background:var(--bg-panel-2); flex:0 0 auto;}
+  .barber-avatar.icon{display:flex; align-items:center; justify-content:center; font-size:20px;}
+  .barber-name{font-weight:600; font-size:16px;}
+  .barber-meta{color:var(--muted); font-size:12px; margin-top:2px;}
+  .calendar-actions{display:flex; gap:8px; margin-top:18px;}
+  .calendar-actions a, .calendar-actions button{flex:1; font-family:var(--sans); font-size:13px; font-weight:600; padding:12px; border-radius:10px; border:1px solid var(--line); background:var(--bg-panel); color:var(--white); text-align:center; text-decoration:none; cursor:pointer;}
+  .tenant-missing{max-width:420px; margin:80px auto; padding:0 24px; text-align:center; color:var(--muted);}
+  .tenant-missing h2{font-family:var(--display); color:var(--gold); font-size:26px; margin-bottom:10px;}
+  .tenant-missing code{background:var(--bg-panel); border:1px solid var(--line); padding:2px 6px; border-radius:6px; color:var(--gold-light);}
+  .barber-list-row{display:flex; align-items:center; gap:12px;}
+  .barber-list-row .barber-avatar{width:40px; height:40px;}
+  .barber-list-row .info{flex:1;}
+  .barber-list-row .svc-tags{color:var(--muted); font-size:11px; margin-top:2px;}
+  .checkbox-grid{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;}
+  .checkbox-grid label{display:flex; align-items:center; gap:6px; background:var(--bg-panel-2); border:1px solid var(--line); padding:8px 10px; border-radius:8px; font-size:12px; cursor:pointer;}
   ::-webkit-scrollbar{display:none;}
 </style>
 </head>
@@ -202,7 +220,7 @@ const firebaseConfig = {
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, deleteDoc,
-  query, where, orderBy, onSnapshot, writeBatch, Timestamp
+  query, where, orderBy, onSnapshot, writeBatch, runTransaction, arrayUnion, Timestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
@@ -211,6 +229,44 @@ import {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const auth = getAuth(app);
+
+/* -------------------------------------------------------------------------
+   MULTI-TENANT: cada barbearia vive em tenants/{tenantSlug}/...
+   IMPORTANTE — configure as Firestore Security Rules no console assim
+   (troca simples de leitura pública / escrita restrita ao dono do tenant):
+
+   match /tenants/{tenantSlug} {
+     match /config/business { allow read: if true; allow write: if request.auth.token.email in resource.data.adminEmails || !exists(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business); }
+     match /services/{d}      { allow read: if true; allow write: if request.auth.token.email in get(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business).data.adminEmails; }
+     match /barbers/{d}       { allow read: if true; allow write: if request.auth.token.email in get(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business).data.adminEmails; }
+     match /appointments/{d}  { allow read, write: if request.auth.token.email in get(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business).data.adminEmails; allow create: if true; }
+     match /scheduleLocks/{d} { allow read: if true; allow write: if true; } // escrita via transação no confirmBooking
+     match /clients/{d}       { allow read, write: if request.auth.token.email in get(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business).data.adminEmails; allow create, update: if true; }
+     match /blockedSlots/{d}  { allow read: if true; allow write: if request.auth.token.email in get(/databases/$(database)/documents/tenants/$(tenantSlug)/config/business).data.adminEmails; }
+   }
+   ------------------------------------------------------------------------- */
+const tCol = name => collection(db, 'tenants', state_tenantSlugRef(), name);
+const tDoc = (name, id) => doc(db, 'tenants', state_tenantSlugRef(), name, id);
+const tConfigDoc = () => doc(db, 'tenants', state_tenantSlugRef(), 'config', 'business');
+function state_tenantSlugRef(){ return state.tenantSlug; }
+
+function resolveTenantSlug(){
+  // suporta #/minha-barbearia  |  #/minha-barbearia/admin  |  ?tenant=slug  |  ?t=slug
+  const hash = location.hash.replace(/^#\/?/, '');
+  const parts = hash.split('/').filter(Boolean);
+  let slug = null, isAdmin = false;
+  if(parts.length){
+    if(parts[0] === 'admin'){ isAdmin = true; }
+    else { slug = parts[0]; if(parts[1] === 'admin') isAdmin = true; }
+  }
+  if(!slug){
+    const qp = new URLSearchParams(location.search);
+    slug = qp.get('tenant') || qp.get('t') || slug;
+  }
+  return { slug, isAdmin };
+}
+function adminHashFor(slug){ return `#/${slug}/admin`; }
+function clientHashFor(slug){ return `#/${slug}`; }
 
 const DEFAULT_LOGO_SVG = "data:image/svg+xml;utf8," + encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
@@ -275,67 +331,82 @@ const phoneMask = v => {
 
 // ---------- ESTADO ----------
 const state = {
-  route: location.hash.includes('admin') ? 'admin' : 'client',
+  tenantSlug: null,
+  route: 'client',
   services: [],
-  config: { hours: DEFAULT_HOURS, blockedDates: [], businessName: 'Barber Agenda', logo: null },
-  booking: { service:null, date:null, time:null, name:'', phone:'', note:'' },
+  barbers: [],
+  config: { hours: DEFAULT_HOURS, blockedDates: [], businessName: 'Barber Agenda', logo: null, adminEmails: [] },
+  booking: { service:null, barber:null, barberMode:null, date:null, time:null, candidatesByTime:{}, name:'', phone:'', note:'', confirmedBarberId:null, _apptId:null },
   admin: { user:null, tab:'agendamentos', dayAppointments:[], selectedDate: toDateStr(new Date()), earningsPeriod:'hoje', services:[], blockedDates:[], blockedSlots:[] }
 };
 
-window.addEventListener('hashchange', ()=>{
-  state.route = location.hash.includes('admin') ? 'admin' : 'client';
-  render();
-});
+let tenantListenersAttached = false;
+function attachTenantListeners(){
+  if(tenantListenersAttached) return;
+  tenantListenersAttached = true;
 
-// ---------- FIRESTORE: leitura pública ----------
-onSnapshot(collection(db,'services'), snap=>{
-  state.services = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.order??0)-(b.order??0));
-  if(state.route==='client') render();
-  if(state.route==='admin') renderAdminServicesIfActive();
-});
-
-onSnapshot(doc(db,'config','business'), snap=>{
-  if(snap.exists()){
-    const data = snap.data();
-    state.config.hours = { ...DEFAULT_HOURS, ...(data.hours||{}) };
-    state.config.blockedDates = data.blockedDates || [];
-    state.config.businessName = data.businessName || 'Barber Agenda';
-    state.config.logo = data.logo || null;
-  }
-  document.title = `${state.config.businessName} — Agendamento`;
-  const favicon = $('#favicon-link');
-  if(favicon) favicon.href = state.config.logo || DEFAULT_LOGO_SVG;
-  if(state.route==='client') render();
-  if(state.route==='admin'){ renderAdminHoursIfActive(); if(state.admin.user) $('.admin-header h1') && ($('.admin-header h1').textContent = `${state.config.businessName} — Painel`); }
-});
-
-// ---------- DISPONIBILIDADE ----------
-async function getAvailableTimes(dateStr, duration){
-  const d = fromDateStr(dateStr);
-  const dow = DOW_KEYS[d.getDay()];
-  const hours = state.config.hours[dow];
-  if(!hours || hours.closed) return [];
-  if(state.config.blockedDates.includes(dateStr)) return [];
-
-  const openMin = timeToMin(hours.open);
-  const closeMin = timeToMin(hours.close);
-
-  // horários ocupados por agendamentos existentes (via coleção pública 'slots')
-  const slotsSnap = await getDocs(query(collection(db,'slots'), where('date','==', dateStr)));
-  const busyRanges = slotsSnap.docs.map(d=>{
-    const s = d.data();
-    const start = timeToMin(s.time);
-    return [start, start + (s.duration||30)];
+  onSnapshot(tCol('services'), snap=>{
+    state.services = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.order??0)-(b.order??0));
+    if(state.route==='client') render();
+    if(state.route==='admin') renderAdminServicesIfActive();
   });
 
-  // horários bloqueados manualmente pelo admin
-  const blockedSnap = await getDocs(query(collection(db,'blockedSlots'), where('date','==', dateStr)));
-  const blockedTimes = new Set(blockedSnap.docs.map(d=>d.data().time));
+  onSnapshot(tCol('barbers'), snap=>{
+    state.barbers = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.order??0)-(b.order??0));
+    if(state.route==='client') render();
+    if(state.route==='admin') renderAdminBarbersIfActive();
+  });
 
-  const now = new Date();
-  const isToday = dateStr === toDateStr(now);
-  const nowMin = now.getHours()*60 + now.getMinutes() + 30; // buffer de 30min
+  onSnapshot(tConfigDoc(), snap=>{
+    if(snap.exists()){
+      const data = snap.data();
+      state.config.hours = { ...DEFAULT_HOURS, ...(data.hours||{}) };
+      state.config.blockedDates = data.blockedDates || [];
+      state.config.businessName = data.businessName || 'Barber Agenda';
+      state.config.logo = data.logo || null;
+      state.config.adminEmails = data.adminEmails || [];
+    }
+    document.title = `${state.config.businessName} — Agendamento`;
+    const favicon = $('#favicon-link');
+    if(favicon) favicon.href = state.config.logo || DEFAULT_LOGO_SVG;
+    if(state.route==='client') render();
+    if(state.route==='admin'){ renderAdminHoursIfActive(); if(state.admin.user) $('.admin-header h1') && ($('.admin-header h1').textContent = `${state.config.businessName} — Painel`); }
+  });
+}
 
+function renderTenantMissing(){
+  const root = $('#app'); root.innerHTML = '';
+  const box = el('div','tenant-missing');
+  box.innerHTML = `
+    <h2>Barbearia não identificada</h2>
+    <p>Acesse com o endereço da sua barbearia, por exemplo:<br><code>seudominio.com/#/minha-barbearia</code></p>
+    <p style="margin-top:10px;">Para o painel administrativo:<br><code>seudominio.com/#/minha-barbearia/admin</code></p>`;
+  root.appendChild(box);
+}
+
+function routeFromHash(){
+  const { slug, isAdmin } = resolveTenantSlug();
+  state.route = isAdmin ? 'admin' : 'client';
+  if(slug !== state.tenantSlug){
+    state.tenantSlug = slug;
+    tenantListenersAttached = false;
+    state.services = []; state.barbers = [];
+  }
+  if(!state.tenantSlug){ renderTenantMissing(); return; }
+  attachTenantListeners();
+  render();
+}
+
+window.addEventListener('hashchange', routeFromHash);
+
+// ---------- DISPONIBILIDADE ----------
+function barbersForService(serviceId){
+  return state.barbers.filter(b => b.active!==false && (!b.services || b.services.length===0 || b.services.includes(serviceId)));
+}
+
+async function freeTimesForBarber(barberId, dateStr, duration, openMin, closeMin, blockedTimes, isToday, nowMin){
+  const lockSnap = await getDoc(tDoc('scheduleLocks', `${barberId}_${dateStr}`));
+  const busyRanges = lockSnap.exists() ? (lockSnap.data().booked||[]).map(x=>[x.start, x.start + (x.duration||30)]) : [];
   const slots = [];
   for(let t=openMin; t + duration <= closeMin; t += SLOT_STEP){
     const time = minToTime(t);
@@ -348,10 +419,44 @@ async function getAvailableTimes(dateStr, duration){
   return slots;
 }
 
+// Retorna { times: string[], candidatesByTime: {time: [barberId,...]} }
+async function getAvailableTimes(dateStr, duration, barberId){
+  const d = fromDateStr(dateStr);
+  const dow = DOW_KEYS[d.getDay()];
+  const hours = state.config.hours[dow];
+  if(!hours || hours.closed) return { times:[], candidatesByTime:{} };
+  if(state.config.blockedDates.includes(dateStr)) return { times:[], candidatesByTime:{} };
+
+  const openMin = timeToMin(hours.open);
+  const closeMin = timeToMin(hours.close);
+
+  const blockedSnap = await getDocs(query(tCol('blockedSlots'), where('date','==', dateStr)));
+  const blockedTimes = new Set(blockedSnap.docs.map(d=>d.data().time));
+
+  const now = new Date();
+  const isToday = dateStr === toDateStr(now);
+  const nowMin = now.getHours()*60 + now.getMinutes() + 30; // buffer de 30min
+
+  if(barberId){
+    const times = await freeTimesForBarber(barberId, dateStr, duration, openMin, closeMin, blockedTimes, isToday, nowMin);
+    return { times, candidatesByTime: Object.fromEntries(times.map(t=>[t,[barberId]])) };
+  }
+
+  // "Primeiro disponível": une horários livres de todos os barbeiros elegíveis
+  const eligible = barbersForService(state.booking.service.id);
+  const candidatesByTime = {};
+  for(const b of eligible){
+    const times = await freeTimesForBarber(b.id, dateStr, duration, openMin, closeMin, blockedTimes, isToday, nowMin);
+    times.forEach(t=>{ (candidatesByTime[t] = candidatesByTime[t] || []).push(b.id); });
+  }
+  const times = Object.keys(candidatesByTime).sort();
+  return { times, candidatesByTime };
+}
+
 // ==========================================================================
 // RENDER — CLIENTE
 // ==========================================================================
-let clientStep = 1; // 1 serviço, 2 data, 3 horário, 4 dados, 5 sucesso
+let clientStep = 1; // 1 serviço, 2 barbeiro, 3 data, 4 horário, 5 dados, 6 sucesso
 
 function renderClient(){
   const root = $('#app');
@@ -366,9 +471,9 @@ function renderClient(){
     <div class="sub">Reserve seu horário</div>`;
   wrap.appendChild(header);
 
-  if(clientStep <= 4){
+  if(clientStep <= 5){
     const steps = el('div','steps');
-    for(let i=1;i<=4;i++){
+    for(let i=1;i<=5;i++){
       const dot = el('div', `step-dot ${i<clientStep?'done':i===clientStep?'active':''}`);
       steps.appendChild(dot);
     }
@@ -377,10 +482,11 @@ function renderClient(){
 
   const main = el('main');
   if(clientStep===1) renderStepService(main);
-  else if(clientStep===2) renderStepDate(main);
-  else if(clientStep===3) renderStepTime(main);
-  else if(clientStep===4) renderStepIdentify(main);
-  else if(clientStep===5) renderStepDone(main);
+  else if(clientStep===2) renderStepBarber(main);
+  else if(clientStep===3) renderStepDate(main);
+  else if(clientStep===4) renderStepTime(main);
+  else if(clientStep===5) renderStepIdentify(main);
+  else if(clientStep===6) renderStepDone(main);
   wrap.appendChild(main);
 
   const foot = el('footer','foot', `${state.config.businessName} &middot; <button id="admin-link">Área administrativa</button>`);
@@ -389,11 +495,11 @@ function renderClient(){
   root.appendChild(wrap);
   const stripe = el('div','stripe'); root.insertBefore(stripe, wrap);
 
-  $('#admin-link')?.addEventListener('click', ()=>{ location.hash = '#admin'; });
+  $('#admin-link')?.addEventListener('click', ()=>{ location.hash = adminHashFor(state.tenantSlug); });
 }
 
 function renderStepService(main){
-  main.appendChild(el('div','step-title','Passo 1 de 4'));
+  main.appendChild(el('div','step-title','Passo 1 de 5'));
   main.appendChild(el('div','step-heading','Escolha o serviço'));
 
   if(state.services.length===0){
@@ -411,7 +517,52 @@ function renderStepService(main){
       <div class="svc-price">${money(svc.price)}</div>`;
     card.addEventListener('click', ()=>{
       state.booking.service = svc;
+      state.booking.barber = null;
+      state.booking.barberMode = null;
       clientStep = 2;
+      renderClient();
+    });
+    main.appendChild(card);
+  });
+}
+
+function renderStepBarber(main){
+  const bar = el('div','back-row');
+  bar.innerHTML = `<button class="back-btn">&larr; Voltar</button>`;
+  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=1; renderClient(); });
+  main.appendChild(bar);
+
+  main.appendChild(el('div','step-title','Passo 2 de 5'));
+  main.appendChild(el('div','step-heading','Escolha o barbeiro'));
+
+  const eligible = barbersForService(state.booking.service.id);
+
+  const firstCard = el('div', `card barber-card ${state.booking.barberMode==='first'?'selected':''}`);
+  firstCard.innerHTML = `
+    <div class="barber-avatar icon">⚡</div>
+    <div><div class="barber-name">Primeiro disponível</div><div class="barber-meta">Agendamos com quem estiver livre</div></div>`;
+  firstCard.addEventListener('click', ()=>{
+    state.booking.barber = null;
+    state.booking.barberMode = 'first';
+    clientStep = 3;
+    renderClient();
+  });
+  main.appendChild(firstCard);
+
+  if(eligible.length===0){
+    main.appendChild(el('div','empty-state', `<span class="glyph">💈</span>Nenhum barbeiro cadastrado para este serviço ainda.`));
+    return;
+  }
+
+  eligible.forEach(b=>{
+    const card = el('div', `card barber-card ${state.booking.barber?.id===b.id?'selected':''}`);
+    card.innerHTML = `
+      ${b.photo ? `<img class="barber-avatar" src="${b.photo}">` : `<div class="barber-avatar icon">💈</div>`}
+      <div><div class="barber-name">${b.name}</div><div class="barber-meta">${(b.services&&b.services.length)?'Serviços selecionados':'Atende todos os serviços'}</div></div>`;
+    card.addEventListener('click', ()=>{
+      state.booking.barber = b;
+      state.booking.barberMode = 'specific';
+      clientStep = 3;
       renderClient();
     });
     main.appendChild(card);
@@ -421,10 +572,10 @@ function renderStepService(main){
 function renderStepDate(main){
   const bar = el('div','back-row');
   bar.innerHTML = `<button class="back-btn">&larr; Voltar</button>`;
-  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=1; renderClient(); });
+  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=2; renderClient(); });
   main.appendChild(bar);
 
-  main.appendChild(el('div','step-title','Passo 2 de 4'));
+  main.appendChild(el('div','step-title','Passo 3 de 5'));
   main.appendChild(el('div','step-heading','Escolha a data'));
 
   const chips = el('div','date-quickpicks');
@@ -439,7 +590,7 @@ function renderStepDate(main){
     if(!closed){
       chip.addEventListener('click', ()=>{
         state.booking.date = ds;
-        clientStep = 3;
+        clientStep = 4;
         renderClient();
       });
     }
@@ -451,16 +602,18 @@ function renderStepDate(main){
 async function renderStepTime(main){
   const bar = el('div','back-row');
   bar.innerHTML = `<button class="back-btn">&larr; Voltar</button>`;
-  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=2; renderClient(); });
+  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=3; renderClient(); });
   main.appendChild(bar);
 
-  main.appendChild(el('div','step-title','Passo 3 de 4'));
+  main.appendChild(el('div','step-title','Passo 4 de 5'));
   main.appendChild(el('div','step-heading', `Horários — ${fromDateStr(state.booking.date).toLocaleDateString('pt-BR',{weekday:'long', day:'2-digit', month:'long'})}`));
 
   const loading = el('div','empty-state', 'Carregando horários...');
   main.appendChild(loading);
 
-  const times = await getAvailableTimes(state.booking.date, state.booking.service.duration);
+  const barberId = state.booking.barberMode==='specific' ? state.booking.barber.id : null;
+  const { times, candidatesByTime } = await getAvailableTimes(state.booking.date, state.booking.service.duration, barberId);
+  state.booking.candidatesByTime = candidatesByTime;
   loading.remove();
 
   if(times.length===0){
@@ -473,7 +626,7 @@ async function renderStepTime(main){
     const slot = el('div', `time-slot ${state.booking.time===t?'selected':''}`, t);
     slot.addEventListener('click', ()=>{
       state.booking.time = t;
-      clientStep = 4;
+      clientStep = 5;
       renderClient();
     });
     grid.appendChild(slot);
@@ -484,10 +637,10 @@ async function renderStepTime(main){
 function renderStepIdentify(main){
   const bar = el('div','back-row');
   bar.innerHTML = `<button class="back-btn">&larr; Voltar</button>`;
-  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=3; renderClient(); });
+  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=4; renderClient(); });
   main.appendChild(bar);
 
-  main.appendChild(el('div','step-title','Passo 4 de 4'));
+  main.appendChild(el('div','step-title','Passo 5 de 5'));
   main.appendChild(el('div','step-heading','Seus dados'));
 
   main.appendChild(el('label','field-label','Seu nome'));
@@ -508,6 +661,7 @@ function renderStepIdentify(main){
   const summary = el('div','summary-box');
   summary.innerHTML = `
     <div class="summary-row"><span>Serviço</span><strong>${state.booking.service.name}</strong></div>
+    <div class="summary-row"><span>Barbeiro</span><strong>${state.booking.barberMode==='specific' ? state.booking.barber.name : 'Primeiro disponível'}</strong></div>
     <div class="summary-row"><span>Data</span><strong>${fromDateStr(state.booking.date).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'})}</strong></div>
     <div class="summary-row"><span>Horário</span><strong>${state.booking.time}</strong></div>
     <div class="summary-row"><span>Valor</span><strong>${money(state.booking.service.price)}</strong></div>`;
@@ -525,40 +679,137 @@ function renderStepIdentify(main){
   }
 }
 
+// Reserva atômica reutilizável (cliente e agendamento manual do ADM).
+// params: { service, candidates:[barberId,...], date, time, name, phone, note, source }
+// retorna { ok:true, barberId, apptId } ou { ok:false }
+async function attemptBooking(params){
+  const { service, candidates, date, time, name, phone, note, source } = params;
+  const duration = service.duration;
+
+  for(const barberId of candidates){
+    try{
+      let newApptId = null;
+      await runTransaction(db, async (trx)=>{
+        const lockRef = tDoc('scheduleLocks', `${barberId}_${date}`);
+        const lockSnap = await trx.get(lockRef);
+        const booked = lockSnap.exists() ? (lockSnap.data().booked||[]) : [];
+        const startMin = timeToMin(time);
+        const endMin = startMin + duration;
+        const conflict = booked.some(x => startMin < (x.start + x.duration) && endMin > x.start);
+        if(conflict) throw new Error('SLOT_TAKEN');
+
+        const apptRef = doc(tCol('appointments'));
+        const barberName = (state.barbers.find(x=>x.id===barberId)||{}).name || '';
+        trx.set(apptRef, {
+          serviceId: service.id, serviceName: service.name, price: service.price, duration,
+          barberId, barberName,
+          date, time, clientName: name.trim(), clientPhone: phone,
+          note: (note||'').trim(), status: 'agendado', createdAt: Timestamp.now(),
+          source: source || 'cliente'
+        });
+        trx.set(lockRef, { booked: [...booked, { start: startMin, duration, apptId: apptRef.id }] }, { merge:true });
+
+        const clientRef = tDoc('clients', phone.replace(/\D/g,'') || apptRef.id);
+        trx.set(clientRef, {
+          name: name.trim(), phone, lastVisit: date, updatedAt: Timestamp.now(),
+          history: arrayUnion({ apptId: apptRef.id, date, time, service: service.name, price: service.price, barberName })
+        }, { merge:true });
+
+        newApptId = apptRef.id;
+      });
+      return { ok:true, barberId, apptId: newApptId };
+    }catch(err){
+      if(err.message !== 'SLOT_TAKEN'){ console.error(err); }
+      continue;
+    }
+  }
+  return { ok:false };
+}
+
 async function confirmBooking(){
   const b = state.booking;
-  try{
-    const batch = writeBatch(db);
-    const apptRef = doc(collection(db,'appointments'));
-    batch.set(apptRef, {
-      serviceId: b.service.id, serviceName: b.service.name, price: b.service.price, duration: b.service.duration,
-      date: b.date, time: b.time, clientName: b.name.trim(), clientPhone: b.phone,
-      note: b.note.trim(), status: 'agendado', createdAt: Timestamp.now()
-    });
-    const slotRef = doc(collection(db,'slots'));
-    batch.set(slotRef, { date: b.date, time: b.time, duration: b.service.duration, apptId: apptRef.id });
-    await batch.commit();
-    clientStep = 5;
-    renderClient();
-  }catch(err){
-    console.error(err);
-    showToast('Erro ao agendar. Tente novamente.');
+  const candidates = (b.barberMode==='specific') ? [b.barber.id] : (b.candidatesByTime[b.time] || []).slice();
+
+  if(candidates.length===0){
+    showToast('Não há barbeiro disponível para esse horário. Escolha outro.');
+    return;
   }
+
+  const result = await attemptBooking({
+    service: b.service, candidates, date: b.date, time: b.time,
+    name: b.name, phone: b.phone, note: b.note, source: 'cliente'
+  });
+
+  if(!result.ok){
+    showToast('Esse horário acabou de ser reservado. Escolha outro.');
+    clientStep = 4;
+    renderClient();
+    return;
+  }
+
+  b.confirmedBarberId = result.barberId;
+  b._apptId = result.apptId;
+  clientStep = 6;
+  renderClient();
+}
+
+// ---------- INTEGRAÇÃO COM AGENDA DO CELULAR ----------
+function icsFmt(d){ return d.toISOString().replace(/[-:]|\.\d{3}/g,''); }
+function bookingTimes(){
+  const b = state.booking;
+  const start = new Date(`${b.date}T${b.time}:00`);
+  const end = new Date(start.getTime() + b.service.duration*60000);
+  return { start, end };
+}
+function confirmedBarberName(){
+  const b = state.booking;
+  return (state.barbers.find(x=>x.id===b.confirmedBarberId)||{}).name || '';
+}
+function buildGCalUrl(){
+  const b = state.booking; const { start, end } = bookingTimes(); const barberName = confirmedBarberName();
+  const text = encodeURIComponent(`${b.service.name} — ${state.config.businessName}`);
+  const details = encodeURIComponent(`Agendamento em ${state.config.businessName}${barberName?' com '+barberName:''}.`);
+  const location = encodeURIComponent(state.config.businessName);
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${icsFmt(start)}/${icsFmt(end)}&details=${details}&location=${location}`;
+}
+function downloadICS(){
+  const b = state.booking; const { start, end } = bookingTimes(); const barberName = confirmedBarberName();
+  const ics = [
+    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//BarberAgenda//PT-BR','CALSCALE:GREGORIAN','BEGIN:VEVENT',
+    `UID:${b._apptId || Date.now()}@barberagenda`,
+    `DTSTAMP:${icsFmt(new Date())}`, `DTSTART:${icsFmt(start)}`, `DTEND:${icsFmt(end)}`,
+    `SUMMARY:${b.service.name} — ${state.config.businessName}`,
+    `DESCRIPTION:Agendamento em ${state.config.businessName}${barberName?' com '+barberName:''}.`,
+    'END:VEVENT','END:VCALENDAR'
+  ].join('\r\n');
+  const blob = new Blob([ics], {type:'text/calendar;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `agendamento-${b.date}-${b.time.replace(':','')}.ics`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
 }
 
 function renderStepDone(main){
   const box = el('div','confirm-screen');
+  const barberName = confirmedBarberName();
   box.innerHTML = `
     <div class="glyph">✓</div>
     <h2>Agendamento confirmado!</h2>
-    <p>${state.booking.name.split(' ')[0]}, seu horário para <strong>${state.booking.service.name}</strong><br>
+    <p>${state.booking.name.split(' ')[0]}, seu horário para <strong>${state.booking.service.name}</strong>${barberName?` com <strong>${barberName}</strong>`:''}<br>
     dia ${fromDateStr(state.booking.date).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})} às ${state.booking.time} está reservado.</p>`;
   main.appendChild(box);
+
+  const cal = el('div','calendar-actions');
+  const gcalLink = el('a'); gcalLink.href = buildGCalUrl(); gcalLink.target = '_blank'; gcalLink.rel='noopener'; gcalLink.textContent = '+ Google Agenda';
+  const icsBtn = el('button', '', 'Salvar (.ics)'); icsBtn.addEventListener('click', downloadICS);
+  cal.appendChild(gcalLink); cal.appendChild(icsBtn);
+  main.appendChild(cal);
 
   const btn = el('button','btn btn-primary','Fazer novo agendamento');
   btn.style.marginTop='20px';
   btn.addEventListener('click', ()=>{
-    state.booking = { service:null, date:null, time:null, name:'', phone:'', note:'' };
+    state.booking = { service:null, barber:null, barberMode:null, date:null, time:null, candidatesByTime:{}, name:'', phone:'', note:'', confirmedBarberId:null, _apptId:null };
     clientStep = 1;
     renderClient();
   });
@@ -587,7 +838,7 @@ function renderAdmin(){
   wrap.appendChild(header);
 
   const tabs = el('div','tabs');
-  [['agendamentos','Agendamentos'],['ganhos','Ganhos'],['servicos','Serviços'],['horarios','Horários']].forEach(([key,label])=>{
+  [['agendamentos','Agendamentos'],['clientes','Clientes'],['ganhos','Ganhos'],['servicos','Serviços'],['barbeiros','Barbeiros'],['horarios','Horários']].forEach(([key,label])=>{
     const t = el('div', `tab ${state.admin.tab===key?'active':''}`, label);
     t.addEventListener('click', ()=>{ state.admin.tab = key; renderAdmin(); });
     tabs.appendChild(t);
@@ -595,15 +846,19 @@ function renderAdmin(){
   wrap.appendChild(tabs);
 
   const panelAg = el('div', `tab-panel ${state.admin.tab==='agendamentos'?'active':''}`); panelAg.id='panel-agendamentos';
+  const panelCl = el('div', `tab-panel ${state.admin.tab==='clientes'?'active':''}`); panelCl.id='panel-clientes';
   const panelGa = el('div', `tab-panel ${state.admin.tab==='ganhos'?'active':''}`); panelGa.id='panel-ganhos';
   const panelSv = el('div', `tab-panel ${state.admin.tab==='servicos'?'active':''}`); panelSv.id='panel-servicos';
+  const panelBa = el('div', `tab-panel ${state.admin.tab==='barbeiros'?'active':''}`); panelBa.id='panel-barbeiros';
   const panelHo = el('div', `tab-panel ${state.admin.tab==='horarios'?'active':''}`); panelHo.id='panel-horarios';
-  wrap.appendChild(panelAg); wrap.appendChild(panelGa); wrap.appendChild(panelSv); wrap.appendChild(panelHo);
+  wrap.appendChild(panelAg); wrap.appendChild(panelCl); wrap.appendChild(panelGa); wrap.appendChild(panelSv); wrap.appendChild(panelBa); wrap.appendChild(panelHo);
   root.appendChild(wrap);
 
   if(state.admin.tab==='agendamentos') renderAdminAppointments(panelAg);
+  if(state.admin.tab==='clientes') renderAdminClients(panelCl);
   if(state.admin.tab==='ganhos') renderAdminEarnings(panelGa);
   if(state.admin.tab==='servicos') renderAdminServices(panelSv);
+  if(state.admin.tab==='barbeiros') renderAdminBarbers(panelBa);
   if(state.admin.tab==='horarios') renderAdminHours(panelHo);
 }
 
@@ -611,7 +866,7 @@ function renderAdminLogin(root){
   const wrap = el('div','wrap');
   const box = el('div','login-box');
   box.innerHTML = `
-    <h2>Barber Agenda</h2>
+    <h2>${state.config.businessName}</h2>
     <p style="text-align:center; color:var(--muted); font-size:13px; margin:-14px 0 18px;">Painel administrativo</p>
     <label class="field-label">E-mail</label>
     <input type="text" id="login-email" placeholder="seu@email.com">
@@ -622,12 +877,27 @@ function renderAdminLogin(root){
   wrap.appendChild(box);
   root.appendChild(wrap);
 
-  $('#back-to-client').addEventListener('click', ()=>{ location.hash=''; });
+  $('#back-to-client').addEventListener('click', ()=>{ location.hash = clientHashFor(state.tenantSlug); });
   $('#login-btn').addEventListener('click', async ()=>{
     const email = $('#login-email').value.trim();
     const pass = $('#login-pass').value;
     try{
-      await signInWithEmailAndPassword(auth, email, pass);
+      const cred = await signInWithEmailAndPassword(auth, email, pass);
+      // Reivindicação (bootstrap) do tenant: se ainda não existe config, o primeiro login vira admin dono.
+      const cfgSnap = await getDoc(tConfigDoc());
+      if(!cfgSnap.exists()){
+        await setDoc(tConfigDoc(), {
+          businessName: state.tenantSlug, logo: null, hours: DEFAULT_HOURS, blockedDates: [],
+          adminEmails: [cred.user.email]
+        });
+        showToast('Barbearia criada! Configure a identidade em Horários.');
+      } else {
+        const emails = cfgSnap.data().adminEmails || [];
+        if(emails.length && !emails.includes(cred.user.email)){
+          await signOut(auth);
+          showToast('Este login não tem acesso a esta barbearia.');
+        }
+      }
     }catch(err){
       showToast('E-mail ou senha inválidos.');
     }
@@ -638,6 +908,8 @@ function renderAdminLogin(root){
 let unsubAppts = null;
 function renderAdminAppointments(panel){
   panel.innerHTML = `
+    <button class="btn btn-primary" id="manual-booking-toggle" style="margin-bottom:14px;">+ Agendar manualmente</button>
+    <div id="manual-booking-form"></div>
     <input type="date" id="appt-date" value="${state.admin.selectedDate}">
     <div id="appt-list" style="margin-top:14px;"></div>`;
   $('#appt-date').addEventListener('change', e=>{
@@ -646,11 +918,18 @@ function renderAdminAppointments(panel){
   });
   subscribeAppointments();
 
+  $('#manual-booking-toggle').addEventListener('click', ()=>{
+    const box = $('#manual-booking-form');
+    if(box.dataset.open==='1'){ box.innerHTML=''; box.dataset.open='0'; return; }
+    box.dataset.open='1';
+    renderManualBookingForm(box);
+  });
+
   function subscribeAppointments(){
     if(unsubAppts) unsubAppts();
     const list = $('#appt-list');
     list.innerHTML = '<div class="empty-state">Carregando...</div>';
-    const q = query(collection(db,'appointments'), where('date','==', state.admin.selectedDate));
+    const q = query(tCol('appointments'), where('date','==', state.admin.selectedDate));
     unsubAppts = onSnapshot(q, snap=>{
       const items = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=> a.time.localeCompare(b.time));
       list.innerHTML = '';
@@ -661,7 +940,7 @@ function renderAdminAppointments(panel){
           <div class="appt-time">${a.time}</div>
           <div class="appt-info">
             <div class="name">${a.clientName}</div>
-            <div class="meta">${a.serviceName} &middot; ${money(a.price)} &middot; ${a.clientPhone}</div>
+            <div class="meta">${a.serviceName}${a.barberName?' &middot; '+a.barberName:''} &middot; ${money(a.price)} &middot; ${a.clientPhone}</div>
             ${a.note ? `<div class="meta">"${a.note}"</div>` : ''}
             <span class="badge ${a.status}">${a.status}</span>
           </div>
@@ -669,9 +948,9 @@ function renderAdminAppointments(panel){
         const actions = card.querySelector('.appt-actions');
         if(a.status==='agendado'){
           const okBtn = el('button','icon-btn ok','✓');
-          okBtn.addEventListener('click', ()=> updateApptStatus(a.id,'concluido'));
+          okBtn.addEventListener('click', ()=> updateApptStatus(a.id,'concluido', a));
           const cancelBtn = el('button','icon-btn danger','✕');
-          cancelBtn.addEventListener('click', ()=> updateApptStatus(a.id,'cancelado', a.date, a.time));
+          cancelBtn.addEventListener('click', ()=> updateApptStatus(a.id,'cancelado', a));
           actions.appendChild(okBtn); actions.appendChild(cancelBtn);
         }
         list.appendChild(card);
@@ -680,11 +959,105 @@ function renderAdminAppointments(panel){
   }
 }
 
-async function updateApptStatus(id, status, date, time){
-  await updateDoc(doc(db,'appointments',id), { status });
-  if(status==='cancelado' && date && time){
-    const slotSnap = await getDocs(query(collection(db,'slots'), where('apptId','==', id)));
-    slotSnap.docs.forEach(d=> deleteDoc(doc(db,'slots', d.id)));
+function renderManualBookingForm(box){
+  const mb = { service:null, barberMode:'any', barber:null, date: toDateStr(new Date()), time:null, candidatesByTime:{} };
+
+  box.className = 'card';
+  box.innerHTML = `
+    <div class="step-title" style="margin-bottom:8px;">Cliente presencial / telefone</div>
+    <label class="field-label">Serviço</label>
+    <select id="mb-service"><option value="">Selecione...</option>${state.services.map(s=>`<option value="${s.id}">${s.name} — ${money(s.price)}</option>`).join('')}</select>
+    <label class="field-label">Barbeiro</label>
+    <select id="mb-barber"><option value="any">Qualquer disponível</option></select>
+    <label class="field-label">Data</label>
+    <input type="date" id="mb-date" value="${mb.date}">
+    <label class="field-label">Horário</label>
+    <div id="mb-times" class="time-grid" style="margin-top:6px;"><div class="empty-state" style="padding:16px;">Escolha serviço e data.</div></div>
+    <label class="field-label">Nome do cliente</label>
+    <input type="text" id="mb-name" placeholder="Nome completo">
+    <label class="field-label">Celular / WhatsApp</label>
+    <input type="tel" id="mb-phone" placeholder="(21) 99999-9999">
+    <label class="field-label">Observação (opcional)</label>
+    <textarea id="mb-note" rows="2" placeholder="Observação"></textarea>
+    <button class="btn btn-primary" id="mb-confirm" style="margin-top:14px;" disabled>Confirmar agendamento</button>`;
+
+  $('#mb-phone').addEventListener('input', e=>{ e.target.value = phoneMask(e.target.value); });
+
+  async function refreshTimes(){
+    const timesBox = $('#mb-times');
+    if(!mb.service || !mb.date){ timesBox.innerHTML = '<div class="empty-state" style="padding:16px;">Escolha serviço e data.</div>'; return; }
+    timesBox.innerHTML = '<div class="empty-state" style="padding:16px;">Carregando...</div>';
+    const barberId = (mb.barberMode==='specific') ? mb.barber.id : null;
+    const { times, candidatesByTime } = await getAvailableTimesForBooking(mb.service, mb.date, barberId);
+    mb.candidatesByTime = candidatesByTime;
+    mb.time = null; $('#mb-confirm').disabled = true;
+    timesBox.innerHTML = '';
+    if(times.length===0){ timesBox.innerHTML = '<div class="empty-state" style="padding:16px;">Sem horários livres nesse dia.</div>'; return; }
+    times.forEach(t=>{
+      const slot = el('div','time-slot', t);
+      slot.addEventListener('click', ()=>{
+        mb.time = t;
+        timesBox.querySelectorAll('.time-slot').forEach(x=>x.classList.remove('selected'));
+        slot.classList.add('selected');
+        validate();
+      });
+      timesBox.appendChild(slot);
+    });
+  }
+
+  function validate(){
+    $('#mb-confirm').disabled = !(mb.service && mb.time && $('#mb-name').value.trim().length>=3 && $('#mb-phone').value.replace(/\D/g,'').length>=10);
+  }
+
+  $('#mb-service').addEventListener('change', e=>{
+    mb.service = state.services.find(s=>s.id===e.target.value) || null;
+    const barberSel = $('#mb-barber');
+    barberSel.innerHTML = '<option value="any">Qualquer disponível</option>' +
+      barbersForService(mb.service ? mb.service.id : null).map(b=>`<option value="${b.id}">${b.name}</option>`).join('');
+    mb.barberMode='any'; mb.barber=null;
+    refreshTimes(); validate();
+  });
+  $('#mb-barber').addEventListener('change', e=>{
+    if(e.target.value==='any'){ mb.barberMode='any'; mb.barber=null; }
+    else{ mb.barberMode='specific'; mb.barber = state.barbers.find(b=>b.id===e.target.value); }
+    refreshTimes();
+  });
+  $('#mb-date').addEventListener('change', e=>{ mb.date = e.target.value; refreshTimes(); });
+  $('#mb-name').addEventListener('input', validate);
+
+  $('#mb-confirm').addEventListener('click', async ()=>{
+    const name = $('#mb-name').value.trim();
+    const phone = $('#mb-phone').value.trim();
+    const note = $('#mb-note').value;
+    const candidates = (mb.barberMode==='specific') ? [mb.barber.id] : (mb.candidatesByTime[mb.time] || []).slice();
+    if(candidates.length===0){ showToast('Escolha um horário válido.'); return; }
+    $('#mb-confirm').disabled = true;
+    const result = await attemptBooking({ service: mb.service, candidates, date: mb.date, time: mb.time, name, phone, note, source: 'admin' });
+    if(!result.ok){ showToast('Esse horário acabou de ser reservado. Escolha outro.'); refreshTimes(); return; }
+    showToast('Agendamento criado.');
+    box.innerHTML=''; box.dataset.open='0'; box.className='';
+  });
+}
+
+// versão de getAvailableTimes que não depende de state.booking (usada pelo ADM)
+async function getAvailableTimesForBooking(service, dateStr, barberId){
+  const prevService = state.booking.service;
+  state.booking.service = service;
+  const result = await getAvailableTimes(dateStr, service.duration, barberId);
+  state.booking.service = prevService;
+  return result;
+}
+
+async function updateApptStatus(id, status, appt){
+  await updateDoc(tDoc('appointments', id), { status });
+  if(status==='cancelado' && appt && appt.barberId){
+    const lockRef = tDoc('scheduleLocks', `${appt.barberId}_${appt.date}`);
+    await runTransaction(db, async trx=>{
+      const snap = await trx.get(lockRef);
+      if(!snap.exists()) return;
+      const booked = (snap.data().booked||[]).filter(x=>x.apptId!==id);
+      trx.set(lockRef, { booked }, { merge:true });
+    });
   }
   showToast('Atualizado.');
 }
@@ -714,7 +1087,7 @@ function renderAdminEarnings(panel){
     const startStr = toDateStr(start);
     const endStr = toDateStr(today);
 
-    const snap = await getDocs(query(collection(db,'appointments'),
+    const snap = await getDocs(query(tCol('appointments'),
       where('date','>=', startStr), where('date','<=', endStr)));
     const items = snap.docs.map(d=>d.data()).filter(a=>a.status==='concluido');
     const total = items.reduce((s,a)=>s+(a.price||0),0);
@@ -754,7 +1127,7 @@ function renderAdminServices(panel){
       const right = el('div'); right.style.display='flex'; right.style.gap='8px'; right.style.alignItems='center';
       right.innerHTML = `<strong>${money(svc.price)}</strong>`;
       const delBtn = el('button','icon-btn danger','✕');
-      delBtn.addEventListener('click', async ()=>{ await deleteDoc(doc(db,'services',svc.id)); showToast('Serviço removido.'); });
+      delBtn.addEventListener('click', async ()=>{ await deleteDoc(tDoc('services',svc.id)); showToast('Serviço removido.'); });
       right.appendChild(delBtn);
       row.appendChild(right);
       list.appendChild(row);
@@ -766,15 +1139,135 @@ function renderAdminServices(panel){
     const price = parseFloat($('#new-svc-price').value.replace(',','.'));
     const duration = parseInt($('#new-svc-duration').value);
     if(!name || isNaN(price) || isNaN(duration)){ showToast('Preencha todos os campos.'); return; }
-    await addDoc(collection(db,'services'), { name, price, duration, order: state.services.length });
+    await addDoc(tCol('services'), { name, price, duration, order: state.services.length });
     $('#new-svc-name').value=''; $('#new-svc-price').value=''; $('#new-svc-duration').value='';
     showToast('Serviço adicionado.');
   });
 }
 
+// ----- Clientes (CRM) -----
+async function renderAdminClients(panel){
+  panel.innerHTML = `
+    <input type="text" id="client-search" placeholder="Buscar por nome ou telefone...">
+    <div id="client-list" style="margin-top:14px;"><div class="empty-state">Carregando...</div></div>`;
+
+  const snap = await getDocs(query(tCol('clients'), orderBy('lastVisit','desc')));
+  const clients = snap.docs.map(d=>({id:d.id, ...d.data()}));
+
+  function renderList(filter){
+    const list = $('#client-list'); if(!list) return;
+    const f = (filter||'').toLowerCase().replace(/\D/g,'') || (filter||'').toLowerCase();
+    const filtered = !filter ? clients : clients.filter(c=>
+      (c.name||'').toLowerCase().includes((filter||'').toLowerCase()) ||
+      (c.phone||'').replace(/\D/g,'').includes((filter||'').replace(/\D/g,''))
+    );
+    list.innerHTML = '';
+    if(filtered.length===0){ list.innerHTML = '<div class="empty-state"><span class="glyph">👤</span>Nenhum cliente encontrado.</div>'; return; }
+    filtered.forEach(c=>{
+      const history = (c.history||[]).slice().sort((a,b)=> (b.date+b.time).localeCompare(a.date+a.time));
+      const card = el('div','card');
+      card.innerHTML = `
+        <div class="svc-row" style="cursor:pointer;">
+          <div>
+            <div class="svc-name">${c.name||'(sem nome)'}</div>
+            <div class="svc-meta">${c.phone||''} &middot; ${history.length} atendimento${history.length===1?'':'s'}</div>
+          </div>
+          <div class="svc-meta">${c.lastVisit ? fromDateStr(c.lastVisit).toLocaleDateString('pt-BR') : ''}</div>
+        </div>
+        <div class="client-history" style="display:none; margin-top:10px; border-top:1px solid var(--line); padding-top:10px;"></div>`;
+      const histBox = card.querySelector('.client-history');
+      history.forEach(h=>{
+        const row = el('div','summary-row');
+        row.innerHTML = `<span>${fromDateStr(h.date).toLocaleDateString('pt-BR')} ${h.time} &middot; ${h.service}${h.barberName?' &middot; '+h.barberName:''}</span><strong>${money(h.price||0)}</strong>`;
+        histBox.appendChild(row);
+      });
+      card.querySelector('.svc-row').addEventListener('click', ()=>{
+        histBox.style.display = histBox.style.display==='none' ? 'block' : 'none';
+      });
+      list.appendChild(card);
+    });
+  }
+  renderList('');
+  $('#client-search').addEventListener('input', e=> renderList(e.target.value));
+}
+
 function renderAdminServicesIfActive(){
   if(state.route==='admin' && state.admin.tab==='servicos' && state.admin.user){
     const panel = $('#panel-servicos'); if(panel) renderAdminServices(panel);
+  }
+}
+
+// ----- Barbeiros -----
+function renderAdminBarbers(panel){
+  panel.innerHTML = `<div id="barber-list"></div>
+    <div class="step-title" style="margin-top:20px; margin-bottom:8px;">Novo barbeiro</div>
+    <label class="field-label">Nome</label>
+    <input type="text" id="new-barber-name" placeholder="Nome do barbeiro">
+    <label class="field-label">WhatsApp</label>
+    <input type="tel" id="new-barber-phone" placeholder="(21) 99999-9999">
+    <label class="field-label">Foto (opcional)</label>
+    <input type="file" id="new-barber-photo" accept="image/*">
+    <label class="field-label">Serviços que atende (deixe vazio para atender todos)</label>
+    <div class="checkbox-grid" id="new-barber-services"></div>
+    <button class="btn btn-primary" id="add-barber-btn" style="margin-top:14px;">Adicionar barbeiro</button>`;
+
+  const svcGrid = $('#new-barber-services');
+  state.services.forEach(svc=>{
+    const label = el('label','', `<input type="checkbox" value="${svc.id}"> ${svc.name}`);
+    svcGrid.appendChild(label);
+  });
+
+  $('#new-barber-phone').addEventListener('input', e=>{ e.target.value = phoneMask(e.target.value); });
+
+  let pendingPhoto = null;
+  $('#new-barber-photo').addEventListener('change', async e=>{
+    const file = e.target.files[0]; if(!file) return;
+    if(file.size > 5*1024*1024){ showToast('Imagem muito grande (máx. 5MB).'); return; }
+    try{ pendingPhoto = await fileToCompressedDataURL(file, 240, 0.85); }
+    catch(err){ showToast('Não foi possível ler a imagem.'); }
+  });
+
+  $('#add-barber-btn').addEventListener('click', async ()=>{
+    const name = $('#new-barber-name').value.trim();
+    const phone = $('#new-barber-phone').value.trim();
+    if(!name){ showToast('Informe o nome do barbeiro.'); return; }
+    const services = Array.from(svcGrid.querySelectorAll('input:checked')).map(i=>i.value);
+    await addDoc(tCol('barbers'), { name, phone, photo: pendingPhoto, services, active:true, order: state.barbers.length });
+    $('#new-barber-name').value=''; $('#new-barber-phone').value=''; pendingPhoto=null;
+    svcGrid.querySelectorAll('input:checked').forEach(i=> i.checked=false);
+    showToast('Barbeiro adicionado.');
+  });
+
+  renderBarberList();
+
+  function renderBarberList(){
+    const list = $('#barber-list'); list.innerHTML='';
+    if(state.barbers.length===0){ list.innerHTML = '<div class="empty-state">Nenhum barbeiro cadastrado.</div>'; return; }
+    state.barbers.forEach(b=>{
+      const row = el('div','card barber-list-row');
+      const svcNames = (b.services&&b.services.length) ? b.services.map(id=> (state.services.find(s=>s.id===id)||{}).name).filter(Boolean).join(', ') : 'Todos os serviços';
+      row.innerHTML = `
+        ${b.photo ? `<img class="barber-avatar" src="${b.photo}">` : `<div class="barber-avatar icon">💈</div>`}
+        <div class="info">
+          <div class="name">${b.name}${b.active===false?' <span class="badge cancelado">inativo</span>':''}</div>
+          <div class="meta">${b.phone||''}</div>
+          <div class="svc-tags">${svcNames}</div>
+        </div>`;
+      const actions = el('div'); actions.style.display='flex'; actions.style.gap='6px';
+      const toggleBtn = el('button','icon-btn', b.active===false?'Ativar':'Pausar');
+      toggleBtn.addEventListener('click', async ()=>{ await updateDoc(tDoc('barbers',b.id), { active: b.active===false }); });
+      const delBtn = el('button','icon-btn danger','✕');
+      delBtn.addEventListener('click', async ()=>{ await deleteDoc(tDoc('barbers',b.id)); showToast('Barbeiro removido.'); });
+      actions.appendChild(toggleBtn); actions.appendChild(delBtn);
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+  }
+}
+
+function renderAdminBarbersIfActive(){
+  if(state.route==='admin' && state.admin.tab==='barbeiros' && state.admin.user){
+    const panel = $('#panel-barbeiros'); if(panel) renderAdminBarbers(panel);
   }
 }
 
@@ -823,7 +1316,7 @@ function renderAdminHours(panel){
 
   $('#save-identity-btn').addEventListener('click', async ()=>{
     const businessName = $('#biz-name-input').value.trim() || 'Barber Agenda';
-    await setDoc(doc(db,'config','business'), {
+    await setDoc(tConfigDoc(), {
       businessName, logo: pendingLogo,
       hours: state.config.hours, blockedDates: state.config.blockedDates
     }, { merge:true });
@@ -858,14 +1351,14 @@ function renderAdminHours(panel){
       const closed = hoursList.querySelector(`input[data-k="${k}"][data-f="closed"]`).checked;
       newHours[k] = { open, close, closed };
     });
-    await setDoc(doc(db,'config','business'), { hours: newHours, blockedDates: state.config.blockedDates }, { merge:true });
+    await setDoc(tConfigDoc(), { hours: newHours, blockedDates: state.config.blockedDates }, { merge:true });
     showToast('Horários salvos.');
   });
 
   $('#block-date-btn').addEventListener('click', async ()=>{
     const val = $('#block-date-input').value; if(!val) return;
     const updated = Array.from(new Set([...state.config.blockedDates, val]));
-    await setDoc(doc(db,'config','business'), { hours: state.config.hours, blockedDates: updated }, { merge:true });
+    await setDoc(tConfigDoc(), { hours: state.config.hours, blockedDates: updated }, { merge:true });
     showToast('Dia bloqueado.');
   });
 
@@ -880,7 +1373,7 @@ function renderAdminHours(panel){
       const rm = el('button','icon-btn danger','✕');
       rm.addEventListener('click', async ()=>{
         const updated = state.config.blockedDates.filter(x=>x!==ds);
-        await setDoc(doc(db,'config','business'), { hours: state.config.hours, blockedDates: updated }, { merge:true });
+        await setDoc(tConfigDoc(), { hours: state.config.hours, blockedDates: updated }, { merge:true });
         showToast('Bloqueio removido.');
       });
       row.appendChild(rm);
@@ -891,7 +1384,7 @@ function renderAdminHours(panel){
   $('#block-slot-btn').addEventListener('click', async ()=>{
     const date = $('#block-slot-date').value; const time = $('#block-slot-time').value;
     if(!date || !time) return;
-    await addDoc(collection(db,'blockedSlots'), { date, time });
+    await addDoc(tCol('blockedSlots'), { date, time });
     showToast('Horário bloqueado.');
     loadBlockedSlots();
     $('#block-slot-date').value=''; $('#block-slot-time').value='';
@@ -900,7 +1393,7 @@ function renderAdminHours(panel){
   async function loadBlockedSlots(){
     const list = $('#blocked-slots-list'); if(!list) return;
     list.innerHTML = '<div class="empty-state">Carregando...</div>';
-    const snap = await getDocs(query(collection(db,'blockedSlots'), orderBy('date')));
+    const snap = await getDocs(query(tCol('blockedSlots'), orderBy('date')));
     list.innerHTML = '';
     if(snap.empty){ list.innerHTML = '<div class="empty-state">Nenhum horário bloqueado.</div>'; return; }
     snap.docs.forEach(d=>{
@@ -908,7 +1401,7 @@ function renderAdminHours(panel){
       const row = el('div','card block-row');
       row.innerHTML = `<span>${fromDateStr(data.date).toLocaleDateString('pt-BR')} às ${data.time}</span>`;
       const rm = el('button','icon-btn danger','✕');
-      rm.addEventListener('click', async ()=>{ await deleteDoc(doc(db,'blockedSlots', d.id)); loadBlockedSlots(); });
+      rm.addEventListener('click', async ()=>{ await deleteDoc(tDoc('blockedSlots', d.id)); loadBlockedSlots(); });
       row.appendChild(rm);
       list.appendChild(row);
     });
@@ -923,10 +1416,11 @@ function renderAdminHoursIfActive(){
 
 // ==========================================================================
 function render(){
+  if(!state.tenantSlug){ renderTenantMissing(); return; }
   if(state.route==='admin') renderAdmin();
   else renderClient();
 }
-render();
+routeFromHash();
 </script>
 </body>
 </html>
