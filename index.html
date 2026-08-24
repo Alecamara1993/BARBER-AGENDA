@@ -822,7 +822,32 @@ function renderStepDone(main){
 onAuthStateChanged(auth, user=>{
   state.admin.user = user;
   if(state.route==='admin') render();
+  if(user && state.route==='admin' && state.tenantSlug) ensureTenantClaim(user);
 });
+
+// Garante que o tenant tenha um documento config/business com adminEmails.
+// Roda tanto no clique de login quanto em sessões já autenticadas (refresh da página).
+async function ensureTenantClaim(user){
+  try{
+    const cfgSnap = await getDoc(tConfigDoc());
+    if(!cfgSnap.exists()){
+      await setDoc(tConfigDoc(), {
+        businessName: state.tenantSlug, logo: null, hours: DEFAULT_HOURS, blockedDates: [],
+        adminEmails: [user.email]
+      });
+      showToast('Barbearia criada! Configure a identidade em Horários.');
+      if(state.route==='admin') render();
+    } else {
+      const emails = cfgSnap.data().adminEmails || [];
+      if(emails.length && !emails.includes(user.email)){
+        await signOut(auth);
+        showToast('Este login não tem acesso a esta barbearia.');
+      }
+    }
+  }catch(err){
+    console.error('ensureTenantClaim falhou', err);
+  }
+}
 
 function renderAdmin(){
   const root = $('#app');
@@ -883,21 +908,7 @@ function renderAdminLogin(root){
     const pass = $('#login-pass').value;
     try{
       const cred = await signInWithEmailAndPassword(auth, email, pass);
-      // Reivindicação (bootstrap) do tenant: se ainda não existe config, o primeiro login vira admin dono.
-      const cfgSnap = await getDoc(tConfigDoc());
-      if(!cfgSnap.exists()){
-        await setDoc(tConfigDoc(), {
-          businessName: state.tenantSlug, logo: null, hours: DEFAULT_HOURS, blockedDates: [],
-          adminEmails: [cred.user.email]
-        });
-        showToast('Barbearia criada! Configure a identidade em Horários.');
-      } else {
-        const emails = cfgSnap.data().adminEmails || [];
-        if(emails.length && !emails.includes(cred.user.email)){
-          await signOut(auth);
-          showToast('Este login não tem acesso a esta barbearia.');
-        }
-      }
+      await ensureTenantClaim(cred.user);
     }catch(err){
       showToast('E-mail ou senha inválidos.');
     }
