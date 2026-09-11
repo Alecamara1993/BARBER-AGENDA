@@ -67,6 +67,8 @@
   .svc-card{display:flex; justify-content:space-between; align-items:center; cursor:pointer;}
   .svc-card:active{transform:scale(.98);}
   .svc-card.selected{border-color:var(--accent); background:var(--bg-panel-2);}
+  .svc-main{display:flex; align-items:center; gap:12px;}
+  .svc-thumb{width:48px; height:48px; border-radius:var(--radius-sm); object-fit:cover; flex-shrink:0;}
   .svc-name{font-weight:600; font-size:16px;}
   .svc-meta{color:var(--muted); font-size:13px; margin-top:2px;}
   .svc-price{font-family:var(--display); font-weight:700; font-size:17px; color:var(--accent-light);}
@@ -79,15 +81,20 @@
     width:100%; padding:14px; background:var(--bg-panel); border:1px solid var(--line);
     border-radius:var(--radius); color:var(--text); font-size:16px; font-family:var(--sans);
   }
-  .date-quickpicks{display:flex; gap:8px; margin-top:14px; overflow-x:auto; padding-bottom:4px;}
-  .day-chip{
-    flex:0 0 auto; min-width:54px; text-align:center; padding:10px 6px; border-radius:var(--radius-sm);
-    background:var(--bg-panel); border:1px solid var(--line); cursor:pointer; font-size:12px; transition:border-color .15s, background .15s;
-  }
-  .day-chip .dow{color:var(--muted); font-size:11px;}
-  .day-chip .num{font-family:var(--display); font-weight:700; font-size:18px; margin-top:2px;}
-  .day-chip.selected{border-color:var(--accent); background:var(--bg-panel-2);}
-  .day-chip.disabled{opacity:.3; pointer-events:none;}
+  .calendar{background:var(--bg-panel); border:1px solid var(--line); border-radius:var(--radius-lg); padding:14px;}
+  .cal-header{display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;}
+  .cal-month-label{font-family:var(--display); font-weight:700; font-size:15px;}
+  .cal-nav{width:32px; height:32px; border-radius:50%; border:1px solid var(--line); background:var(--bg-panel-2); color:var(--text); font-size:16px; cursor:pointer;}
+  .cal-nav:disabled{opacity:.3; cursor:not-allowed;}
+  .cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:6px;}
+  .cal-weekdays{margin-bottom:6px;}
+  .cal-weekdays div{text-align:center; color:var(--muted); font-size:11px;}
+  .cal-day{aspect-ratio:1; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-sm); cursor:pointer; font-size:14px; transition:border-color .15s, background .15s, color .15s;}
+  .cal-day:not(.empty):not(.disabled){border:1px solid var(--line);}
+  .cal-day.empty{cursor:default;}
+  .cal-day.today{color:var(--accent-light); font-weight:700;}
+  .cal-day.selected{border-color:var(--accent); background:var(--accent); color:#fff; font-weight:600;}
+  .cal-day.disabled{opacity:.25; pointer-events:none;}
 
   .time-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:10px;}
   .time-slot{
@@ -165,6 +172,15 @@
   .period-tabs button{flex:1; padding:10px; border-radius:var(--radius-sm); border:1px solid var(--line); background:var(--bg-panel); color:var(--muted); font-size:13px; cursor:pointer; transition:border-color .15s, color .15s;}
   .period-tabs button.active{border-color:var(--accent); color:var(--accent-light);}
 
+  .svc-row-main{display:flex; align-items:center; gap:10px;}
+  .svc-thumb-edit{position:relative; width:44px; height:44px; border-radius:var(--radius-sm); overflow:hidden; cursor:pointer;
+    flex-shrink:0; background:var(--bg-panel-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--muted);}
+  .svc-thumb-edit img{width:100%; height:100%; object-fit:cover;}
+  .svc-thumb-edit svg{width:18px; height:18px;}
+  .svc-thumb-edit input[type=file]{display:none;}
+  .svc-thumb-remove{position:absolute; top:-4px; right:-4px; width:16px; height:16px; border-radius:50%; background:var(--red);
+    color:#fff; font-size:10px; line-height:1; display:flex; align-items:center; justify-content:center; border:none; cursor:pointer;}
+
   .svc-row, .hour-row, .block-row{display:flex; align-items:center; gap:10px; justify-content:space-between;}
   .hour-row{padding:12px 0; border-bottom:1px solid var(--line);}
   .hour-row .dow-label{width:76px; font-weight:600; font-size:14px;}
@@ -229,6 +245,7 @@ const DEFAULT_LOGO_SVG = "data:image/svg+xml;utf8," + encodeURIComponent(`
 const ICON_LIST = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="8" y1="7" x2="20" y2="7"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="17" x2="20" y2="17"/><line x1="4" y1="7" x2="4" y2="7"/><line x1="4" y1="12" x2="4" y2="12"/><line x1="4" y1="17" x2="4" y2="17"/></svg>`;
 const ICON_CALENDAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="3"/><line x1="3.5" y1="10" x2="20.5" y2="10"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="16" y1="3" x2="16" y2="7"/></svg>`;
 const ICON_INBOX = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l2 3h4l2-3h4"/><path d="M5.5 5h13l2 7v7a1.5 1.5 0 0 1-1.5 1.5h-14A1.5 1.5 0 0 1 3.5 19v-7z"/></svg>`;
+const ICON_CAMERA = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>`;
 
 // ---------- CONSTANTES ----------
 const DOW_KEYS = ['dom','seg','ter','qua','qui','sex','sab'];
@@ -242,6 +259,7 @@ const el = (tag, cls, html) => { const e = document.createElement(tag); if(cls) 
 const pad = n => String(n).padStart(2,'0');
 const toDateStr = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const fromDateStr = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); };
+const monthLabel = d => { const s = d.toLocaleDateString('pt-BR', {month:'long', year:'numeric'}); return s.charAt(0).toUpperCase()+s.slice(1); };
 const timeToMin = t => { const [h,m] = t.split(':').map(Number); return h*60+m; };
 const minToTime = min => `${pad(Math.floor(min/60))}:${pad(min%60)}`;
 const money = v => v.toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
@@ -409,9 +427,12 @@ function renderStepService(main){
   state.services.forEach(svc=>{
     const card = el('div', `card svc-card ${state.booking.service?.id===svc.id?'selected':''}`);
     card.innerHTML = `
-      <div>
-        <div class="svc-name">${svc.name}</div>
-        <div class="svc-meta">${svc.duration} min</div>
+      <div class="svc-main">
+        ${svc.photo ? `<img class="svc-thumb" src="${svc.photo}" alt="${svc.name}">` : ''}
+        <div>
+          <div class="svc-name">${svc.name}</div>
+          <div class="svc-meta">${svc.duration} min</div>
+        </div>
       </div>
       <div class="svc-price">${money(svc.price)}</div>`;
     card.addEventListener('click', ()=>{
@@ -423,34 +444,61 @@ function renderStepService(main){
   });
 }
 
+let calMonthOffset = 0; // 0 = mês atual; navegação da agenda no passo 2
+
 function renderStepDate(main){
   const bar = el('div','back-row');
   bar.innerHTML = `<button class="back-btn">&larr; Voltar</button>`;
-  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=1; renderClient(); });
+  bar.querySelector('button').addEventListener('click', ()=>{ clientStep=1; calMonthOffset=0; renderClient(); });
   main.appendChild(bar);
 
   main.appendChild(el('div','step-title','Passo 2 de 4'));
   main.appendChild(el('div','step-heading','Escolha a data'));
 
-  const chips = el('div','date-quickpicks');
   const today = new Date();
-  for(let i=0;i<21;i++){
-    const d = new Date(today); d.setDate(d.getDate()+i);
+  const todayStr = toDateStr(today);
+  const viewDate = new Date(today.getFullYear(), today.getMonth() + calMonthOffset, 1);
+
+  const cal = el('div','calendar');
+
+  const header = el('div','cal-header');
+  const prevBtn = el('button','cal-nav','&lsaquo;');
+  prevBtn.disabled = calMonthOffset<=0;
+  prevBtn.addEventListener('click', ()=>{ calMonthOffset--; renderClient(); });
+  const label = el('div','cal-month-label', monthLabel(viewDate));
+  const nextBtn = el('button','cal-nav','&rsaquo;');
+  nextBtn.addEventListener('click', ()=>{ calMonthOffset++; renderClient(); });
+  header.appendChild(prevBtn); header.appendChild(label); header.appendChild(nextBtn);
+  cal.appendChild(header);
+
+  const weekdays = el('div','cal-grid cal-weekdays');
+  DOW_LABELS.forEach(l=> weekdays.appendChild(el('div','', l)));
+  cal.appendChild(weekdays);
+
+  const days = el('div','cal-grid cal-days');
+  const firstWeekday = viewDate.getDay();
+  for(let i=0;i<firstWeekday;i++) days.appendChild(el('div','cal-day empty'));
+
+  const totalDays = new Date(viewDate.getFullYear(), viewDate.getMonth()+1, 0).getDate();
+  for(let day=1; day<=totalDays; day++){
+    const d = new Date(viewDate.getFullYear(), viewDate.getMonth(), day);
     const ds = toDateStr(d);
     const dow = DOW_KEYS[d.getDay()];
     const closed = state.config.hours[dow]?.closed || state.config.blockedDates.includes(ds);
-    const chip = el('div', `day-chip ${closed?'disabled':''} ${state.booking.date===ds?'selected':''}`);
-    chip.innerHTML = `<div class="dow">${DOW_LABELS[d.getDay()]}</div><div class="num">${d.getDate()}</div>`;
-    if(!closed){
-      chip.addEventListener('click', ()=>{
+    const isPast = ds < todayStr;
+    const disabled = closed || isPast;
+    const cell = el('div', `cal-day ${disabled?'disabled':''} ${ds===todayStr?'today':''} ${state.booking.date===ds?'selected':''}`, String(day));
+    if(!disabled){
+      cell.addEventListener('click', ()=>{
         state.booking.date = ds;
         clientStep = 3;
         renderClient();
       });
     }
-    chips.appendChild(chip);
+    days.appendChild(cell);
   }
-  main.appendChild(chips);
+  cal.appendChild(days);
+  main.appendChild(cal);
 }
 
 async function renderStepTime(main){
@@ -565,6 +613,7 @@ function renderStepDone(main){
   btn.addEventListener('click', ()=>{
     state.booking = { service:null, date:null, time:null, name:'', phone:'', note:'' };
     clientStep = 1;
+    calMonthOffset = 0;
     renderClient();
   });
   main.appendChild(btn);
@@ -746,8 +795,29 @@ function renderAdminServices(panel){
       <input type="text" id="new-svc-name" placeholder="Nome do serviço" style="flex:1 1 100%; margin-bottom:8px;">
       <input type="text" id="new-svc-price" placeholder="Preço (ex: 45)" style="flex:1;">
       <input type="text" id="new-svc-duration" placeholder="Min." style="flex:1;">
-      <button class="small-btn" id="add-svc-btn">Adicionar</button>
-    </div>`;
+    </div>
+    <div style="display:flex; align-items:center; gap:12px; margin-top:10px;">
+      <div class="svc-thumb-edit" id="new-svc-thumb">${ICON_CAMERA}</div>
+      <span style="font-size:12px; color:var(--muted);">Foto do serviço (opcional) &mdash; o cliente vê na hora de escolher.</span>
+    </div>
+    <button class="btn btn-primary" id="add-svc-btn" style="margin-top:14px;">Adicionar serviço</button>`;
+
+  let pendingSvcPhoto = null;
+  const newThumb = $('#new-svc-thumb');
+  const newPhotoInput = document.createElement('input');
+  newPhotoInput.type = 'file'; newPhotoInput.accept = 'image/*';
+  newThumb.appendChild(newPhotoInput);
+  newThumb.addEventListener('click', ()=> newPhotoInput.click());
+  newPhotoInput.addEventListener('change', async e=>{
+    const file = e.target.files[0]; if(!file) return;
+    if(file.size > 5*1024*1024){ showToast('Imagem muito grande (máx. 5MB).'); return; }
+    try{
+      pendingSvcPhoto = await fileToCompressedDataURL(file, 320, 0.85);
+      newThumb.innerHTML = `<img src="${pendingSvcPhoto}" alt="">`;
+      newThumb.appendChild(newPhotoInput);
+    }catch(err){ showToast('Não foi possível ler a imagem.'); }
+  });
+
   renderList();
 
   function renderList(){
@@ -755,7 +825,35 @@ function renderAdminServices(panel){
     if(state.services.length===0) list.innerHTML = '<div class="empty-state">Nenhum serviço cadastrado.</div>';
     state.services.forEach(svc=>{
       const row = el('div','card svc-row');
-      row.innerHTML = `<span>${svc.name} &middot; ${svc.duration}min</span>`;
+
+      const left = el('div','svc-row-main');
+      const thumb = el('div','svc-thumb-edit', svc.photo ? `<img src="${svc.photo}" alt="">` : ICON_CAMERA);
+      const photoInput = document.createElement('input');
+      photoInput.type = 'file'; photoInput.accept = 'image/*';
+      thumb.appendChild(photoInput);
+      thumb.addEventListener('click', ()=> photoInput.click());
+      photoInput.addEventListener('change', async e=>{
+        const file = e.target.files[0]; if(!file) return;
+        if(file.size > 5*1024*1024){ showToast('Imagem muito grande (máx. 5MB).'); return; }
+        try{
+          const dataUrl = await fileToCompressedDataURL(file, 320, 0.85);
+          await updateDoc(doc(db,'services',svc.id), { photo: dataUrl });
+          showToast('Foto atualizada.');
+        }catch(err){ showToast('Não foi possível ler a imagem.'); }
+      });
+      if(svc.photo){
+        const rmBtn = el('button','svc-thumb-remove','✕');
+        rmBtn.addEventListener('click', async ev=>{
+          ev.stopPropagation();
+          await updateDoc(doc(db,'services',svc.id), { photo: null });
+          showToast('Foto removida.');
+        });
+        thumb.appendChild(rmBtn);
+      }
+      left.appendChild(thumb);
+      left.appendChild(el('span','', `${svc.name} &middot; ${svc.duration}min`));
+      row.appendChild(left);
+
       const right = el('div'); right.style.display='flex'; right.style.gap='8px'; right.style.alignItems='center';
       right.innerHTML = `<strong>${money(svc.price)}</strong>`;
       const delBtn = el('button','icon-btn danger','✕');
@@ -771,8 +869,11 @@ function renderAdminServices(panel){
     const price = parseFloat($('#new-svc-price').value.replace(',','.'));
     const duration = parseInt($('#new-svc-duration').value);
     if(!name || isNaN(price) || isNaN(duration)){ showToast('Preencha todos os campos.'); return; }
-    await addDoc(collection(db,'services'), { name, price, duration, order: state.services.length });
+    await addDoc(collection(db,'services'), { name, price, duration, photo: pendingSvcPhoto, order: state.services.length });
     $('#new-svc-name').value=''; $('#new-svc-price').value=''; $('#new-svc-duration').value='';
+    pendingSvcPhoto = null;
+    newThumb.innerHTML = ICON_CAMERA;
+    newThumb.appendChild(newPhotoInput);
     showToast('Serviço adicionado.');
   });
 }
