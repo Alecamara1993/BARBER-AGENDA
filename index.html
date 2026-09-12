@@ -833,9 +833,21 @@ async function deleteAppointment(id){
 }
 
 async function updateApptStatus(id, status, date, time, paymentMethod){
-  const payload = { status };
-  if(status==='concluido' && paymentMethod) payload.paymentMethod = paymentMethod;
-  await updateDoc(doc(db,'appointments',id), payload);
+  try{
+    await updateDoc(doc(db,'appointments',id), { status });
+  }catch(err){
+    console.error('Falha ao atualizar status:', err);
+    showToast('Erro ao atualizar status. Verifique as regras do Firestore.');
+    return;
+  }
+  if(status==='concluido' && paymentMethod){
+    try{
+      await updateDoc(doc(db,'appointments',id), { paymentMethod });
+    }catch(err){
+      console.error('Falha ao salvar forma de pagamento:', err);
+      showToast('Concluído, mas a forma de pagamento não foi salva.');
+    }
+  }
   if(status==='cancelado' && date && time){
     const slotSnap = await getDocs(query(collection(db,'slots'), where('apptId','==', id)));
     slotSnap.docs.forEach(d=> deleteDoc(doc(db,'slots', d.id)));
