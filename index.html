@@ -836,20 +836,17 @@ async function deleteAppointment(id){
 }
 
 async function updateApptStatus(id, status, date, time, paymentMethod){
-  try{
-    await updateDoc(doc(db,'appointments',id), { status });
-  }catch(err){
-    console.error('Falha ao atualizar status:', err);
-    showToast('Erro ao atualizar status. Verifique as regras do Firestore.');
-    return;
+  const payload = { status };
+  if(status==='concluido'){
+    payload.completedAt = Timestamp.now();
+    if(paymentMethod) payload.paymentMethod = paymentMethod;
   }
-  if(status==='concluido' && paymentMethod){
-    try{
-      await updateDoc(doc(db,'appointments',id), { paymentMethod });
-    }catch(err){
-      console.error('Falha ao salvar forma de pagamento:', err);
-      showToast('Concluído, mas a forma de pagamento não foi salva.');
-    }
+  try{
+    await updateDoc(doc(db,'appointments',id), payload);
+  }catch(err){
+    console.error('Falha ao atualizar agendamento:', err);
+    showToast('Erro ao atualizar agendamento.');
+    return;
   }
   if(status==='cancelado' && date && time){
     const slotSnap = await getDocs(query(collection(db,'slots'), where('apptId','==', id)));
@@ -877,17 +874,22 @@ function renderAdminEarnings(panel){
   function subscribeEarnings(){
     if(unsubEarnings) unsubEarnings();
     const body = $('#earnings-body'); body.innerHTML = '<div class="empty-state">Calculando...</div>';
-    const today = new Date();
+    const now = new Date();
     let start;
-    if(state.admin.earningsPeriod==='hoje') start = new Date(today);
-    else if(state.admin.earningsPeriod==='semana'){ start = new Date(today); start.setDate(start.getDate()-6); }
-    else { start = new Date(today.getFullYear(), today.getMonth(), 1); }
-    const startStr = toDateStr(start);
-    const endStr = toDateStr(today);
+    if(state.admin.earningsPeriod==='hoje') start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    else if(state.admin.earningsPeriod==='semana') start = new Date(now.getFullYear(), now.getMonth(), now.getDate()-6);
+    else start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
-    const q = query(collection(db,'appointments'), where('date','>=', startStr), where('date','<=', endStr));
+    // Filtra por completedAt (momento real da conclusão) em vez da data agendada,
+    // assim um atendimento concluído hoje conta em "Hoje" mesmo que o agendamento
+    // fosse para outro dia. Só documentos com status concluído têm esse campo,
+    // então não é necessário combinar com where('status','==',...) — evita índice composto.
+    const q = query(collection(db,'appointments'),
+      where('completedAt','>=', Timestamp.fromDate(start)),
+      where('completedAt','<=', Timestamp.fromDate(end)));
     unsubEarnings = onSnapshot(q, snap=>{
-      const items = snap.docs.map(d=>d.data()).filter(a=>a.status==='concluido');
+      const items = snap.docs.map(d=>d.data());
       renderEarningsBody(body, items);
     }, err=>{
       console.error('Erro ao carregar ganhos:', err);
